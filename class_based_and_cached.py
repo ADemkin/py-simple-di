@@ -1,13 +1,24 @@
 from __future__ import annotations
 
-from typing import Any, Type, Generic, TypeVar, ParamSpecArgs, ParamSpecKwargs, Iterable
 from dataclasses import dataclass
+from typing import Any
+from typing import Callable
+from typing import Generic
+from typing import Iterable
+from typing import ParamSpecArgs
+from typing import ParamSpecKwargs
+from typing import Type
+from typing import TypeVar
 
 T = TypeVar("T", bound=Any)
 
 
+class DependencyInjectionError(Exception):
+    pass
+
+
 def name(obj: Any) -> str:
-    if not hasattr(obj, '__name__'):
+    if not hasattr(obj, "__name__"):
         obj = obj.__class__
     return obj.__name__
 
@@ -16,23 +27,39 @@ def annotations(cls: Any) -> Iterable[str, Type]:
     return cls.__annotations__.items()
 
 
-class Factory(Generic[T]):
+class Registry(Generic[T]):
     # keep all factories in a class variable
-    _registry: dict[str, Factory[T]] = {}
+    _registry: dict[str, Callable[T]] = {}
 
     @classmethod
     def clear(cls) -> None:
         cls._registry.clear()
 
+
+class Instance(Generic[T], Registry[T]):
+    _instance: T
+
+    def __init__(self, instance: T) -> None:
+        self._instance = instance
+        self._registry[name(instance)] = self
+
+    def __call__(self) -> T:
+        return self._instance
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}<{self._instance.__class__.__name__}"
+
+
+class Factory(Instance[T], Generic[T]):
     _cls: Type[T]
     _args: ParamSpecArgs
     _kwargs: ParamSpecKwargs
 
     def __init__(
-            self,
-            cls: Type[T],
-            *args: ParamSpecArgs,
-            **kwargs: ParamSpecKwargs
+        self,
+        cls: Type[T],
+        *args: ParamSpecArgs,
+        **kwargs: ParamSpecKwargs,
     ) -> None:
         self._cls = cls
         self._args = args
@@ -50,7 +77,10 @@ class Factory(Generic[T]):
         dependencies = self._get_deps_kwargs()
         resolved_args = (*self._args, *args)
         resolved_kwargs = {**dependencies, **self._kwargs, **kwargs}
-        return self._cls(*resolved_args, **resolved_kwargs)
+        try:
+            return self._cls(*resolved_args, **resolved_kwargs)
+        except TypeError as err:
+            raise DependencyInjectionError(err) from err
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}<{self._cls.__name__}>"
@@ -78,7 +108,8 @@ class Singleton(Factory, Generic[T]):
         return instance
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+
     @dataclass
     class Logger:
         level: str = "INFO"
@@ -95,9 +126,22 @@ if __name__ == '__main__':
         logger: Logger
 
     @dataclass
+    class ApiClient:
+        host: str = "external"
+        port: int = 80
+
+    @dataclass
     class Service:
         repo: Repo
         logger: Logger
+        api: ApiClient
+
+    # test Instance
+    api_client = ApiClient()
+    api_instance_provider = Instance(api_client)
+    assert api_instance_provider() == api_client
+    Instance.clear()
+    print("Instance test passed")
 
     # test Factory
     logger_factory = Factory(Logger)
@@ -157,6 +201,8 @@ if __name__ == '__main__':
     Singleton.clear()
 
     # test injection
+    api_client = ApiClient()
+    Instance(api_client)
     Singleton(Logger)
     client_factory = Singleton(Client)
     repo_factory = Factory(Repo)
@@ -172,6 +218,8 @@ if __name__ == '__main__':
     Singleton.clear()
 
     # test cached injection
+    api_client = ApiClient()
+    Instance(api_client)
     logger_factory = Singleton(Logger)
     client_factory = Singleton(Client)
     repo_factory = Factory(Repo)
@@ -181,4 +229,16 @@ if __name__ == '__main__':
     repo = repo_factory()
     assert isinstance(repo.logger, Logger)
     assert id(service.logger) == id(repo.logger)
+    Factory.clear()
+    Singleton.clear()
     print("Cached injection test passed")
+
+    # test missing dependency
+    try:
+        Factory(Client)()
+    except DependencyInjectionError as err:
+        assert "missing 1 required positional argument: 'logger'" in str(err)
+    else:
+        assert False, "did not raise"
+    Factory.clear()
+    print("Missing dependency test passed")
