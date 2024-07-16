@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from dataclasses import field
 from functools import partial
-from functools import partialmethod
+from functools import wraps
 from typing import Any
 from typing import Mapping
 from typing import Callable
@@ -12,6 +12,7 @@ from typing import ParamSpec
 from typing import Type
 from typing import TypeVar
 from typing import Self
+from typing import get_type_hints
 
 
 T = TypeVar("T", bound=Any)
@@ -28,13 +29,9 @@ def name(obj: Any) -> str:
     return obj.__name__
 
 
-def annotations(cls: Any) -> Iterable[tuple[str, Type]]:
-    return cls.__annotations__.items()
-
-
 @dataclass(slots=True, frozen=True)
 class Provider(Generic[T]):
-    _registry: dict[str, partial[T]] = field(default_factory=dict)
+    _factories: dict[str, partial[T]] = field(default_factory=dict)
     _instances: dict[str, T] = field(default_factory=dict)
 
     @classmethod
@@ -53,37 +50,36 @@ class Provider(Generic[T]):
     def register_instance(self, instance: T) -> None:
         self._instances[name(instance)] = instance
 
-    def get_instance(self, cls: Type[T]) -> T | None:
-        return self._instances.get(name(cls))
+    def register_factory(
+        self, cls: Type[T,], *args: P.args, **kwargs: P.kwargs
+    ) -> None:
+        self._factories[name(cls)] = partial(cls, *args, **kwargs)
 
-    def get_factory(self, cls: Type[T]) -> partial[T] | None:
-        return self._registry.get(name(cls))
+    def _build(self, cls: Type[T]) -> T | None:
+        cls_name = name(cls)
+        if instance := self._instances.get(cls_name):
+            return instance
+        if factory := self._factories.get(cls_name):
+            dependencies = self.gather_dependencies(cls)
+            return factory(**dependencies)
+        return None
 
-    def register_factory(self, cls: Type[T], *args: P.args, **kwargs: P.kwargs) -> None:
-        self._registry[name(cls)] = partial(cls, *args, **kwargs)
-
-    def _gather_deps(self, cls: Type[T] | Callable[P, Any]) -> Mapping[str, T]:
+    def gather_dependencies(self, obj: Type[T] | Callable[P, Any]) -> Mapping[str, T]:
         kwargs = {}
-        for arg, dep in annotations(cls):
-            if instance := self.get_instance(dep):
+        for arg, dep in get_type_hints(obj).items():
+            if instance := self._build(dep):
                 kwargs[arg] = instance
-                continue
-            if factory := self.get_factory(dep):
-                dependencies = self._gather_deps(dep)
-                kwargs[arg] = factory(**dependencies)
         return kwargs
 
     def provide(self, cls: Type[T]) -> T:
-        if instance := self.get_instance(cls):
+        if instance := self._build(cls):
             return instance
-        if factory := self.get_factory(cls):
-            dependencies = self._gather_deps(cls)
-            return factory(**dependencies)
         raise DependencyInjectionError(f"{cls} is not registered")
 
     def inject(self, func: Callable[P, T]) -> Callable[P, T]:
+        @wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
-            dependencies = self._gather_deps(func)
+            dependencies = self.gather_dependencies(func)
             return func(*args, **kwargs, **dependencies)
 
         return wrapper
@@ -202,7 +198,7 @@ if __name__ == "__main__":
     async def ensure_logger_async(logger: Logger) -> None:
         await asyncio.sleep(0)
         assert isinstance(logger, Logger)
-        print('executed')
+        print("executed")
 
     asyncio.run(ensure_logger_async())  # type: ignore
     print("Inject async decorator test passed")
@@ -216,3 +212,26 @@ if __name__ == "__main__":
     service = provider.provide(Service)
     assert isinstance(service, Service)
     print("Provider factory method test passed")
+
+    # test injection
+    def inject(func: Callable[P, T]) -> Callable[P, T]:
+        @wraps(func)
+        async def wrapper(self, *args: P.args, **kwargs: P.kwargs) -> T:
+            dependencies = self.gather_dependencies(func)
+            return await func(*args, **kwargs, **dependencies)
+
+        return wrapper
+
+    class MyHandler:
+        provider = Provider.create(
+            instances=[Logger()],
+            factories=[Client, Repo, ApiClient, Service],
+        )
+
+        @inject
+        async def post(self, service: Service) -> None:
+            print("executed")
+            assert isinstance(service, Service)
+
+    MyHandler().post()
+    print("Injection test passed")
