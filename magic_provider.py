@@ -12,6 +12,8 @@ from typing import TypeVar
 from typing import Self
 from typing import Generator
 from typing import get_type_hints
+from typing import Protocol
+from typing import runtime_checkable
 
 
 T = TypeVar("T", bound=Any)
@@ -23,7 +25,7 @@ class DependencyInjectionError(Exception):
 
 
 class CircularDependencyError(DependencyInjectionError):
-    def __init__(self, obj: Type[T], dep: Type[T]) -> None:
+    def __init__(self, obj: Any, dep: Any) -> None:
         message = f"circular dependency between {name(dep)!r} & {name(obj)!r}"
         super().__init__(message)
 
@@ -40,38 +42,30 @@ def name(obj: Any) -> str:
     return obj.__name__
 
 
-class Injectable:
-    __is_immutable__ = False
+@runtime_checkable
+class Injectable(Protocol):
+    __singletone__: bool = False
 
 
 class Singletone(Injectable):
-    __is_immutable__ = True
+    __singletone__: bool = True
 
 
 def is_injectable(obj: Any) -> bool:
-    try:
-        return issubclass(obj, Injectable)
-    except TypeError:
-        return False
+    return isinstance(obj, Injectable)
 
 
-def set_not_mutable(obj: Any) -> None:
-    setattr(obj, "__is_immutable__", False)
+def is_singletone(obj: Any) -> bool:
+    return getattr(obj, "__singletone__", False)
 
 
-def set_mutable(obj: Any) -> None:
-    setattr(obj, "__is_immutable__", True)
+def set_singletone(obj: Any, value: bool) -> None:
+    setattr(obj, "__singletone__", False)
 
 
-def is_immutable(obj: Any) -> bool:
-    return getattr(obj, "__is_immutable__", False)
-
-
-def can_be_cached(obj: Any, deps: Mapping[str, Any]) -> bool:
-    if not is_immutable(obj):
-        return False
+def is_all_singletones(deps: Mapping[str, Any]) -> bool:
     for dep in deps.values():
-        if not is_immutable(dep):
+        if not is_singletone(dep):
             return False
     return True
 
@@ -120,15 +114,12 @@ class Provider(Generic[T]):
         return kwargs
 
     def build(self, cls: Type[T]) -> T:
-        if instance := self._instances.get(name(cls)):
+        if (instance := self._instances.get(name(cls))) is not None:
             return instance
         deps = self.gather_dependencies(cls)
         instance = cls(**deps)
-        if can_be_cached(cls, deps):
-            set_not_mutable(instance)
+        if is_singletone(instance) and is_all_singletones(deps):
             self.register_instance(instance)
-        else:
-            set_mutable(instance)
         return instance
 
 
@@ -161,21 +152,21 @@ if __name__ == "__main__":
         logger: Logger
         api: ApiClient
 
-    # # test build
-    # provider = Provider()
-    # logger = provider.build(Logger)
-    # assert isinstance(logger, Logger)
-    # assert logger.level == "INFO"
-    # print("build test passed")
+    # test build
+    provider = Provider()
+    logger = provider.build(Logger)
+    assert isinstance(logger, Logger)
+    assert logger.level == "INFO"
+    print("build test passed")
 
-    # # test build keeps default values
-    # provider = Provider()
-    # client = provider.build(Client)
-    # assert client.host == "localhost"
-    # assert client.port == 8080
-    # logger = client.logger
-    # assert logger.level == "INFO"
-    # print("build keeps default values test passed")
+    # test build keeps default values
+    provider = Provider()
+    client = provider.build(Client)
+    assert client.host == "localhost"
+    assert client.port == 8080
+    logger = client.logger
+    assert logger.level == "INFO"
+    print("build keeps default values test passed")
 
     # test build dataclass with default factory field
     @dataclass
@@ -198,15 +189,16 @@ if __name__ == "__main__":
     @dataclass
     class Missing:
         logger: Logger
-        converter: "Converter"  # noqa: F821
+        undefined: "Undefined"  # noqa: F821
 
     try:
         provider.build(Missing)
     except DependencyInjectionError as err:
-        assert "unable to resolve dependency: 'Converter'" in str(err)
+        assert "unable to resolve dependency: 'Undefined'" in str(err)
     else:
         raise AssertionError(
-            "expected DependencyInjectionError - unable to resolve dependency: 'Converter'"
+            "expected DependencyInjectionError - "
+            "unable to resolve dependency: 'Undefined'"
         )
     print("missing dependency test passed")
 
@@ -266,3 +258,15 @@ if __name__ == "__main__":
     service = provider.build(ImmutableService)
     assert id(service) != id(provider.build(ImmutableService))
     print("mutable chain test passed")
+
+    # test protocol without inheritance
+    @dataclass
+    class ProtocolService:
+        logger: Logger
+        api: ApiClient
+        __singletone__: bool = False
+
+    provider = Provider()
+    service = provider.build(ProtocolService)
+    assert isinstance(service, ProtocolService)
+    print("protocol without inheritance test passed")
