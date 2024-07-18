@@ -14,6 +14,9 @@ from typing import Generator
 from typing import get_type_hints
 from typing import Protocol
 from typing import runtime_checkable
+from typing import NamedTuple
+
+import pytest
 
 
 T = TypeVar("T", bound=Any)
@@ -56,6 +59,11 @@ def is_injectable(obj: Any) -> bool:
 
 
 def is_singletone(obj: Any) -> bool:
+    if params := getattr(obj, "__dataclass_params__", None):
+        if params.frozen:
+            return True
+    if isinstance(obj, tuple):
+        return True
     return getattr(obj, "__singletone__", False)
 
 
@@ -123,121 +131,123 @@ class Provider(Generic[T]):
         return instance
 
 
-if __name__ == "__main__":
+# TESTS
 
-    @dataclass
-    class Logger(Singletone):
-        level: str = "INFO"
-        formatter: Callable | None = None
 
-    @dataclass
-    class Client(Injectable):
-        logger: Logger
-        host: str = "localhost"
-        port: int = 8080
+@dataclass
+class Logger(Singletone):
+    level: str = "INFO"
+    formatter: Callable | None = None
 
-    @dataclass
-    class Repo(Injectable):
-        client: Client
-        logger: Logger
 
-    @dataclass
-    class ApiClient(Injectable):
-        host: str = field(default="external")
-        port: int = field(default=80)
+@dataclass
+class Client(Injectable):
+    logger: Logger
+    host: str = "localhost"
+    port: int = 8080
 
-    @dataclass
-    class Service(Injectable):
-        repo: Repo
-        logger: Logger
-        api: ApiClient
 
-    # test build
-    provider = Provider()
+@dataclass
+class Repo(Injectable):
+    client: Client
+    logger: Logger
+
+
+@dataclass
+class ApiClient(Injectable):
+    host: str = field(default="external")
+    port: int = field(default=80)
+
+
+@dataclass
+class Service(Injectable):
+    repo: Repo
+    logger: Logger
+    api: ApiClient
+
+
+@pytest.fixture
+def provider() -> Provider:
+    return Provider()
+
+
+def test_build(provider: Provider) -> None:
+    logger = provider.build(Logger)
+    assert isinstance(logger, Logger)
+
+
+def test_build_with_default_values(provider: Provider) -> None:
     logger = provider.build(Logger)
     assert isinstance(logger, Logger)
     assert logger.level == "INFO"
-    print("build test passed")
 
-    # test build keeps default values
-    provider = Provider()
+
+def test_build_with_injection_keeps_all_default_values(
+    provider: Provider,
+) -> None:
     client = provider.build(Client)
     assert client.host == "localhost"
     assert client.port == 8080
-    logger = client.logger
-    assert logger.level == "INFO"
-    print("build keeps default values test passed")
 
-    # test build dataclass with default factory field
+
+def test_build_dataclass_with_default_factory(provider: Provider) -> None:
     @dataclass
     class ClientWithDefaultLogger(Injectable):
         logger: Logger = field(default_factory=Logger)
 
-    provider = Provider()
     client = provider.build(ClientWithDefaultLogger)
     assert client.logger is provider.build(Logger)
-    print("build with default field test passed")
 
-    # Test injection
+
+def test_build_with_instance(provider: Provider) -> None:
     logger = Logger()
-    provider = Provider.create([logger])
+    provider.register_instance(logger)
     service = provider.build(Service)
     assert isinstance(service, Service)
-    print("service test passed")
+    assert service.logger is logger
 
-    # Test missing dependency
+
+def test_build_raises_if_dependency_missing(provider: Provider) -> None:
     @dataclass
     class Missing:
         logger: Logger
-        undefined: "Undefined"  # noqa: F821
+        undefined: "Undefined"  # type: ignore # noqa: F821
 
-    try:
+    with pytest.raises(DependencyInjectionError) as err:
         provider.build(Missing)
-    except DependencyInjectionError as err:
-        assert "unable to resolve dependency: 'Undefined'" in str(err)
-    else:
-        raise AssertionError(
-            "expected DependencyInjectionError - "
-            "unable to resolve dependency: 'Undefined'"
-        )
-    print("missing dependency test passed")
 
-    # test circular depedency
+    assert "unable to resolve dependency: 'Undefined'" in str(err)
+
+
+def test_build_raises_if_circular_dependency(provider: Provider) -> None:
     @dataclass
     class A(Injectable):
         b: "B"
 
     @dataclass
     class B(Injectable):
-        a: A
+        a: "A"
 
-    provider = Provider()
-    try:
+    with pytest.raises(DependencyInjectionError) as err:
         provider.build(A)
-    except DependencyInjectionError as err:
         assert "circular dependency between" in str(err)
         assert "'A'" in str(err)
         assert "'B'" in str(err)
-    else:
-        raise AssertionError(
-            "expected DependencyInjectionError - "
-            "circular dependency between 'A' & 'B'"
-        )
-    print("circular dependency test passed")
 
-    # test cache immutable instance
-    provider = Provider()
+
+def test_build_caches_immutable_instane(provider: Provider) -> None:
     logger = provider.build(Logger)
-    assert id(logger) == id(provider.build(Logger))
-    print("cache immutable instance test passed")
+    assert logger is provider.build(Logger)
 
-    # test do not cache mutable instance
-    provider = Provider()
+
+def test_build_do_not_cache_mutable_instance(provider: Provider) -> None:
     client = provider.build(Client)
-    assert id(client) != id(provider.build(Client))
-    print("do not cache mutable instance test passed")
+    assert client is not provider.build(Client)
 
-    # test mutable chain
+
+def test_build_do_not_cache_singletone_with_direct_mutable_deps(
+    provider: Provider,
+) -> None:
     @dataclass
     class ImmutableClient(Singletone):
         logger: Logger
@@ -251,22 +261,62 @@ if __name__ == "__main__":
 
     @dataclass
     class ImmutableService(Singletone):
+        """Singletone has mutable dependency- repo and MUST not be cached."""
+
         repo: MutableRepo
         logger: Logger
 
-    provider = Provider()
     service = provider.build(ImmutableService)
-    assert id(service) != id(provider.build(ImmutableService))
-    print("mutable chain test passed")
+    assert service is not provider.build(ImmutableService)
 
-    # test protocol without inheritance
+
+def test_build_will_cache_singletone_with_immutable_deps(
+    provider: Provider,
+) -> None:
+    @dataclass
+    class ImmutableClient(Singletone):
+        logger: Logger
+        host: str = "localhost"
+        port: int = 8080
+
+    @dataclass
+    class ImmutableRepo(Singletone):
+        client: ImmutableClient
+        logger: Logger
+
+    @dataclass
+    class ImmutableService(Singletone):
+        repo: ImmutableRepo
+        logger: Logger
+
+    service = provider.build(ImmutableService)
+    assert service is provider.build(ImmutableService)
+
+
+def test_build_instance_with_protocol(provider: Provider) -> None:
     @dataclass
     class ProtocolService:
         logger: Logger
         api: ApiClient
         __singletone__: bool = False
 
-    provider = Provider()
     service = provider.build(ProtocolService)
     assert isinstance(service, ProtocolService)
-    print("protocol without inheritance test passed")
+
+
+def test_build_will_cache_frozen_dataclass(provider: Provider) -> None:
+    @dataclass(frozen=True)
+    class FrozenClient:
+        logger: Logger
+
+    client = provider.build(FrozenClient)
+    assert client is provider.build(FrozenClient)
+
+
+def test_build_will_cache_namedtuple(provider: Provider) -> None:
+    class NamedTupleClient(NamedTuple):
+        logger: Logger
+
+    provider = Provider()
+    client = provider.build(NamedTupleClient)
+    assert client is provider.build(NamedTupleClient)
