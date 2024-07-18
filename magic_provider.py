@@ -15,7 +15,6 @@ from typing import Generator
 from typing import get_type_hints
 from typing import Protocol
 from typing import runtime_checkable
-from typing import NamedTuple
 
 import pytest
 
@@ -59,8 +58,6 @@ def is_immutable(obj: Any) -> bool:
     if params := getattr(obj, "__dataclass_params__", None):
         if params.frozen:
             return True
-    if isinstance(obj, tuple):
-        return True
     return bool(getattr(obj, "__singletone__", False))
 
 
@@ -312,15 +309,6 @@ def test_build_will_cache_frozen_dataclass(provider: Provider) -> None:
 
     client = provider.build(FrozenClient)
     assert client is provider.build(FrozenClient)
-
-
-def test_build_will_cache_namedtuple(provider: Provider) -> None:
-    class NamedTupleClient(NamedTuple):
-        logger: Logger
-
-    provider = Provider()
-    client = provider.build(NamedTupleClient)
-    assert client is provider.build(NamedTupleClient)
 
 
 def test_inject_provides_dependencies(provider: Provider) -> None:
