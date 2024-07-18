@@ -375,3 +375,23 @@ def test_inject_provides_depenencies_for_async_function(
         return a + b
 
     assert asyncio.run(handler(1, 2)) == 3  # type: ignore
+
+
+def test_build_will_no_provide_dependency_if_not_injectable(
+    provider: Provider,
+) -> None:
+    @dataclass
+    class NotInjectable:
+        host: str = "localhost"
+        port: int = 8080
+
+    @dataclass
+    class WithNotInjectable:
+        not_injectable: NotInjectable
+
+    with pytest.raises(TypeError) as err:
+        provider.build(WithNotInjectable)
+
+    assert "missing 1 required positional argument: 'not_injectable'" in str(
+        err.value
+    )
