@@ -51,10 +51,6 @@ class Injectable(Protocol):
     __singletone__: bool = False
 
 
-class Singletone(Injectable):
-    __singletone__: bool = True
-
-
 def is_injectable(obj: Any) -> bool:
     return isinstance(obj, Injectable)
 
@@ -140,8 +136,8 @@ class Provider(Generic[T]):
         return wrapper
 
 
-@dataclass
-class Logger(Singletone):
+@dataclass(frozen=True)
+class Logger(Injectable):
     level: str = "INFO"
     formatter: Callable | None = None
 
@@ -257,8 +253,8 @@ def test_build_do_not_cache_mutable_instance(provider: Provider) -> None:
 def test_build_do_not_cache_singletone_with_direct_mutable_deps(
     provider: Provider,
 ) -> None:
-    @dataclass
-    class ImmutableClient(Singletone):
+    @dataclass(frozen=True)
+    class ImmutableClient(Injectable):
         logger: Logger
         host: str = "localhost"
         port: int = 8080
@@ -268,9 +264,9 @@ def test_build_do_not_cache_singletone_with_direct_mutable_deps(
         client: ImmutableClient
         logger: Logger
 
-    @dataclass
-    class ImmutableService(Singletone):
-        """Singletone has mutable dependency- repo and MUST not be cached."""
+    @dataclass(frozen=True)
+    class ImmutableService(Injectable):
+        """Injectable has mutable dependency- repo and MUST not be cached."""
 
         repo: MutableRepo
         logger: Logger
@@ -282,19 +278,19 @@ def test_build_do_not_cache_singletone_with_direct_mutable_deps(
 def test_build_will_cache_singletone_with_immutable_deps(
     provider: Provider,
 ) -> None:
-    @dataclass
-    class ImmutableClient(Singletone):
+    @dataclass(frozen=True)
+    class ImmutableClient(Injectable):
         logger: Logger
         host: str = "localhost"
         port: int = 8080
 
-    @dataclass
-    class ImmutableRepo(Singletone):
+    @dataclass(frozen=True)
+    class ImmutableRepo(Injectable):
         client: ImmutableClient
         logger: Logger
 
-    @dataclass
-    class ImmutableService(Singletone):
+    @dataclass(frozen=True)
+    class ImmutableService(Injectable):
         repo: ImmutableRepo
         logger: Logger
 
