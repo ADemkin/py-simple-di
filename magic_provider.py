@@ -51,26 +51,22 @@ class Injectable(Protocol):
     __singletone__: bool = False
 
 
-def is_injectable(obj: Any) -> bool:
-    return isinstance(obj, Injectable)
+def set_singletone(obj: Any, value: bool) -> None:
+    setattr(obj, "__singletone__", False)
 
 
-def is_singletone(obj: Any) -> bool:
+def is_immutable(obj: Any) -> bool:
     if params := getattr(obj, "__dataclass_params__", None):
         if params.frozen:
             return True
     if isinstance(obj, tuple):
         return True
-    return getattr(obj, "__singletone__", False)
+    return bool(getattr(obj, "__singletone__", False))
 
 
-def set_singletone(obj: Any, value: bool) -> None:
-    setattr(obj, "__singletone__", False)
-
-
-def is_all_singletones(deps: Mapping[str, Any]) -> bool:
-    for dep in deps.values():
-        if not is_singletone(dep):
+def is_all_immutable(deps: Iterable[Any]) -> bool:
+    for dep in deps:
+        if not is_immutable(dep):
             return False
     return True
 
@@ -93,8 +89,8 @@ class Provider(Generic[T]):
     @contextmanager
     def _circular_dependency_protection(
         self,
-        obj: Type[T] | Callable[P, T],
-        dep: Type[T],
+        obj: Any,
+        dep: Any,
     ) -> Generator[None, None, None]:
         dep_name = name(dep)
         if dep_name in self._stack:
@@ -112,10 +108,10 @@ class Provider(Generic[T]):
             raise DependencyResolutionError(err.name) from err
         kwargs = {}
         for arg, dep in type_hints.items():
-            if not is_injectable(dep):
+            if not isinstance(dep, Injectable):
                 continue
             with self._circular_dependency_protection(obj, dep):
-                kwargs[arg] = self.build(dep)
+                kwargs[arg] = self.build(dep)  # type: ignore
         return kwargs
 
     def build(self, cls: Type[T]) -> T:
@@ -123,7 +119,7 @@ class Provider(Generic[T]):
             return instance
         deps = self.gather_dependencies(cls)
         instance = cls(**deps)
-        if is_singletone(instance) and is_all_singletones(deps):
+        if is_immutable(instance) and is_all_immutable(deps.values()):
             self.register_instance(instance)
         return instance
 
