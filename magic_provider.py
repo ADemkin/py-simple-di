@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from dataclasses import field
 from contextlib import contextmanager
+from functools import wraps
 from typing import Any
 from typing import Mapping
 from typing import Callable
@@ -130,8 +131,13 @@ class Provider(Generic[T]):
             self.register_instance(instance)
         return instance
 
+    def inject(self, func: Callable[P, Any]) -> Callable[P, Any]:
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            deps = self.gather_dependencies(func)
+            return func(*args, **kwargs, **deps)
 
-# TESTS
+        return wrapper
 
 
 @dataclass
@@ -209,14 +215,14 @@ def test_build_with_instance(provider: Provider) -> None:
 
 def test_build_raises_if_dependency_missing(provider: Provider) -> None:
     @dataclass
-    class Missing:
+    class WithMissingDependency:
         logger: Logger
         undefined: "Undefined"  # type: ignore # noqa: F821
 
-    with pytest.raises(DependencyInjectionError) as err:
-        provider.build(Missing)
+    with pytest.raises(DependencyResolutionError) as err:
+        provider.build(WithMissingDependency)
 
-    assert "unable to resolve dependency: 'Undefined'" in str(err)
+    assert "unable to resolve dependency: 'Undefined'" in str(err.value)
 
 
 def test_build_raises_if_circular_dependency(provider: Provider) -> None:
@@ -226,13 +232,16 @@ def test_build_raises_if_circular_dependency(provider: Provider) -> None:
 
     @dataclass
     class B(Injectable):
-        a: "A"
+        a: A
 
-    with pytest.raises(DependencyInjectionError) as err:
+    A.__annotations__["b"] = B
+
+    with pytest.raises(CircularDependencyError) as err:
         provider.build(A)
-        assert "circular dependency between" in str(err)
-        assert "'A'" in str(err)
-        assert "'B'" in str(err)
+
+    assert "circular dependency between" in str(err.value)
+    assert "'A'" in str(err.value)
+    assert "'B'" in str(err.value)
 
 
 def test_build_caches_immutable_instane(provider: Provider) -> None:
@@ -320,3 +329,49 @@ def test_build_will_cache_namedtuple(provider: Provider) -> None:
     provider = Provider()
     client = provider.build(NamedTupleClient)
     assert client is provider.build(NamedTupleClient)
+
+
+def test_inject_provides_dependencies(provider: Provider) -> None:
+    @provider.inject
+    def handler(logger: Logger, service: Service) -> bool:
+        assert isinstance(logger, Logger)
+        assert isinstance(service, Service)
+        return True
+
+    assert handler()  # type: ignore
+
+
+def test_inject_combines_kwargs(provider: Provider) -> None:
+    @provider.inject
+    def handler(a: int, b: int, logger: Logger, service: Service) -> int:
+        assert isinstance(logger, Logger)
+        assert isinstance(service, Service)
+        return a + b
+
+    assert handler(a=1, b=2) == 3  # type: ignore
+
+
+def test_inject_combines_args(provider: Provider) -> None:
+    @provider.inject
+    def handler(a: int, b: int, logger: Logger, service: Service) -> int:
+        assert isinstance(logger, Logger)
+        assert isinstance(service, Service)
+        return a + b
+
+    assert handler(1, 2) == 3  # type: ignore
+
+
+def test_inject_provides_depenencies_for_async_function(
+    provider: Provider,
+) -> None:
+    import asyncio
+
+    @provider.inject
+    async def handler(
+        a: int, b: int, logger: Logger, service: Service
+    ) -> int:
+        assert isinstance(logger, Logger)
+        assert isinstance(service, Service)
+        return a + b
+
+    assert asyncio.run(handler(1, 2)) == 3  # type: ignore
